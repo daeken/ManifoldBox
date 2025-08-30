@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ManifoldBox - 3D Model Viewer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #viewer {
+            width: 100%;
+            height: 100%;
+        }
+        
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        
+        #status {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 5px 10px;
+            border-radius: 3px;
+            z-index: 100;
+        }
+        
+        .connected {
+            color: #00ff00;
+        }
+        
+        .disconnected {
+            color: #ff0000;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="info">
+            <h3>ManifoldBox</h3>
+            <p>3D Model Compiler and Viewer</p>
+            <div id="stats">
+                <div><strong>Camera:</strong> <span id="camera-pos">0, 0, 0</span></div>
+                <div><strong>Bounds:</strong> <span id="bounds">-</span></div>
+                <div><strong>Mesh:</strong> <span id="mesh-stats">-</span></div>
+            </div>
+        </div>
+        <div id="status" class="disconnected">Disconnected</div>
+        <div id="viewer"></div>
+    </div>
+
+    <!-- Three.js and GLTF Loader -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        class ModelViewer {
+            constructor() {
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.orthographicCamera = new THREE.OrthographicCamera(
+                    window.innerWidth / -2, window.innerWidth / 2,
+                    window.innerHeight / 2, window.innerHeight / -2,
+                    0.1, 1000
+                );
+                this.currentCamera = this.camera; // Track which camera is active
+                this.isPerspective = true;
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.loader = new GLTFLoader();
+                this.currentModel = null;
+                this.websocket = null;
+                
+                // Movement controls
+                this.keys = {
+                    w: false, a: false, s: false, d: false,
+                    shift: false, space: false
+                };
+                this.moveSpeed = 0.1;
+                
+                // Stats tracking
+                this.modelBounds = null;
+                this.meshStats = { vertices: 0, triangles: 0 };
+                
+                // Rendering modes
+                this.wireframeMode = false;
+                
+                // Mouse controls
+                this.mouseX = 0;
+                this.mouseY = 0;
+                this.mouseSensitivity = 0.002;
+                this.pitch = 0;
+                this.yaw = 0;
+                this.isMouseDown = false;
+                
+                this.init();
+                this.setupControls();
+                this.setupWebSocket();
+                this.loadInitialModel();
+            }
+
+            init() {
+                // Setup renderer with better settings for PBR materials
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setClearColor(0x2a2a2a);
+                this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+                this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+                this.renderer.toneMappingExposure = 1.0;
+                document.getElementById('viewer').appendChild(this.renderer.domElement);
+
+                // Setup cameras
+                this.camera.position.set(5, 5, 5);
+                this.orthographicCamera.position.set(5, 5, 5);
+                
+                // Calculate initial look direction to point at origin
+                const lookDirection = new THREE.Vector3(0, 0, 0).sub(this.camera.position).normalize();
+                this.yaw = Math.atan2(lookDirection.x, lookDirection.z);
+                this.pitch = Math.asin(-lookDirection.y);
+                
+                // Set initial camera orientation for both cameras
+                this.updateCameraRotation();
+                
+                // Initialize stats display
+                this.updateStats();
+
+                // Setup lighting - brighter for better material visibility
+                const ambientLight = new THREE.AmbientLight(0x404040, 1.0);
+                this.scene.add(ambientLight);
+
+                // Multiple soft directional lights for even illumination
+                const light1 = new THREE.DirectionalLight(0x808080, 1.0);
+                light1.position.set(100000, 100000, 50000);
+                this.scene.add(light1);
+
+                const light2 = new THREE.DirectionalLight(0x808080, 1.0);
+                light2.position.set(-100000, 100000, -50000);
+                this.scene.add(light2);
+
+                const light3 = new THREE.DirectionalLight(0x808080, 1.0);
+                light3.position.set(50000, -100000, 100000);
+                this.scene.add(light3);
+
+                // Add a grid
+                const gridHelper = new THREE.GridHelper(100, 100);
+                gridHelper.material.opacity = 0.3;
+                gridHelper.material.transparent = true;
+                this.scene.add(gridHelper);
+
+                // Handle window resize
+                window.addEventListener('resize', () => this.onWindowResize());
+
+                // Start render loop
+                this.animate();
+            }
+
+            setupControls() {
+                // Keyboard event listeners
+                document.addEventListener('keydown', (event) => {
+                    switch(event.code) {
+                        case 'KeyW':
+                            this.keys.w = true;
+                            break;
+                        case 'KeyA':
+                            this.keys.a = true;
+                            break;
+                        case 'KeyS':
+                            this.keys.s = true;
+                            break;
+                        case 'KeyD':
+                            this.keys.d = true;
+                            break;
+                        case 'ShiftLeft':
+                        case 'ShiftRight':
+                            this.keys.shift = true;
+                            break;
+                        case 'Space':
+                            this.keys.space = true;
+                            event.preventDefault(); // Prevent page scrolling
+                            break;
+                        case 'KeyP':
+                            this.toggleCameraMode();
+                            event.preventDefault();
+                            break;
+                        case 'KeyO':
+                            this.toggleWireframe();
+                            event.preventDefault();
+                            break;
+                    }
+                });
+
+                document.addEventListener('keyup', (event) => {
+                    switch(event.code) {
+                        case 'KeyW':
+                            this.keys.w = false;
+                            break;
+                        case 'KeyA':
+                            this.keys.a = false;
+                            break;
+                        case 'KeyS':
+                            this.keys.s = false;
+                            break;
+                        case 'KeyD':
+                            this.keys.d = false;
+                            break;
+                        case 'ShiftLeft':
+                        case 'ShiftRight':
+                            this.keys.shift = false;
+                            break;
+                        case 'Space':
+                            this.keys.space = false;
+                            break;
+                    }
+                });
+
+                // Mouse controls
+                this.renderer.domElement.addEventListener('mousedown', (event) => {
+                    this.isMouseDown = true;
+                    this.lastMouseX = event.clientX;
+                    this.lastMouseY = event.clientY;
+                });
+
+                document.addEventListener('mouseup', () => {
+                    this.isMouseDown = false;
+                });
+
+                document.addEventListener('mousemove', (event) => {
+                    if (!this.isMouseDown) return;
+
+                    const deltaX = event.clientX - this.lastMouseX;
+                    const deltaY = event.clientY - this.lastMouseY;
+
+                    this.yaw -= deltaX * this.mouseSensitivity;
+                    this.pitch += deltaY * this.mouseSensitivity; // Fixed: + instead of - for natural control
+
+                    // Limit pitch to prevent camera flipping
+                    this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
+
+                    this.updateCameraRotation();
+
+                    this.lastMouseX = event.clientX;
+                    this.lastMouseY = event.clientY;
+                });
+            }
+
+            updateCameraRotation() {
+                // Calculate look direction from yaw and pitch
+                const direction = new THREE.Vector3();
+                direction.x = Math.sin(this.yaw) * Math.cos(this.pitch);
+                direction.y = -Math.sin(this.pitch);
+                direction.z = Math.cos(this.yaw) * Math.cos(this.pitch);
+                
+                // Set camera rotation for both cameras
+                const lookTarget = new THREE.Vector3().addVectors(this.currentCamera.position, direction);
+                this.camera.lookAt(lookTarget);
+                this.orthographicCamera.lookAt(lookTarget);
+            }
+
+            updateMovement() {
+                const moveVector = new THREE.Vector3();
+                
+                // Calculate movement directions relative to camera orientation
+                const forward = new THREE.Vector3();
+                const right = new THREE.Vector3();
+                const up = new THREE.Vector3(0, 1, 0);
+                
+                // Forward/back: camera's look direction
+                this.camera.getWorldDirection(forward);
+                
+                // Right/left: perpendicular to forward and up
+                right.crossVectors(forward, up).normalize();
+                
+                // Calculate movement based on key presses
+                if (this.keys.w) {
+                    moveVector.add(forward.clone().multiplyScalar(this.moveSpeed));
+                }
+                if (this.keys.s) {
+                    moveVector.add(forward.clone().multiplyScalar(-this.moveSpeed));
+                }
+                if (this.keys.a) {
+                    moveVector.add(right.clone().multiplyScalar(-this.moveSpeed));
+                }
+                if (this.keys.d) {
+                    moveVector.add(right.clone().multiplyScalar(this.moveSpeed));
+                }
+                if (this.keys.space) {
+                    moveVector.add(up.clone().multiplyScalar(this.moveSpeed));
+                }
+                if (this.keys.shift) {
+                    moveVector.add(up.clone().multiplyScalar(-this.moveSpeed));
+                }
+                
+                // Apply movement to both cameras
+                if (moveVector.length() > 0) {
+                    this.camera.position.add(moveVector);
+                    this.orthographicCamera.position.copy(this.camera.position);
+                    
+                    // Update orthographic camera zoom based on distance when in orthographic mode
+                    if (!this.isPerspective) {
+                        this.updateOrthographicZoom();
+                    }
+                    
+                    this.updateStats();
+                }
+            }
+
+            updateOrthographicZoom() {
+                // Update orthographic camera size based on distance from origin
+                const distance = this.camera.position.length();
+                const aspect = window.innerWidth / window.innerHeight;
+                const size = distance * 0.5; // Scale factor to make zoom feel natural
+                
+                this.orthographicCamera.left = -size * aspect;
+                this.orthographicCamera.right = size * aspect;
+                this.orthographicCamera.top = size;
+                this.orthographicCamera.bottom = -size;
+                this.orthographicCamera.updateProjectionMatrix();
+            }
+
+            updateStats() {
+                // Update camera position
+                const pos = this.currentCamera.position;
+                const cameraType = this.isPerspective ? 'P' : 'O';
+                const wireframe = this.wireframeMode ? ' | Wire' : '';
+                document.getElementById('camera-pos').textContent = 
+                    `${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)} (${cameraType}${wireframe})`;
+                
+                // Update bounds display
+                if (this.modelBounds) {
+                    const size = this.modelBounds.getSize(new THREE.Vector3());
+                    document.getElementById('bounds').textContent = 
+                        `${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)}`;
+                } else {
+                    document.getElementById('bounds').textContent = '-';
+                }
+                
+                // Update mesh stats
+                if (this.meshStats.vertices > 0) {
+                    document.getElementById('mesh-stats').textContent = 
+                        `${this.meshStats.vertices} verts, ${this.meshStats.triangles} tris`;
+                } else {
+                    document.getElementById('mesh-stats').textContent = '-';
+                }
+            }
+
+            toggleCameraMode() {
+                this.isPerspective = !this.isPerspective;
+                this.currentCamera = this.isPerspective ? this.camera : this.orthographicCamera;
+                
+                // Update orthographic camera zoom when switching to orthographic mode
+                if (!this.isPerspective) {
+                    this.updateOrthographicZoom();
+                }
+                
+                this.updateStats();
+            }
+
+            toggleWireframe() {
+                this.wireframeMode = !this.wireframeMode;
+                
+                if (this.currentModel) {
+                    this.currentModel.traverse((child) => {
+                        if (child.isMesh && child.material) {
+                            child.material.wireframe = this.wireframeMode;
+                        }
+                    });
+                }
+                
+                this.updateStats();
+            }
+
+            setupWebSocket() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${window.location.host}/ws`;
+                
+                this.websocket = new WebSocket(wsUrl);
+                
+                this.websocket.onopen = () => {
+                    document.getElementById('status').textContent = 'Connected';
+                    document.getElementById('status').className = 'connected';
+                };
+
+                this.websocket.onclose = () => {
+                    document.getElementById('status').textContent = 'Disconnected';
+                    document.getElementById('status').className = 'disconnected';
+                    
+                    // Reconnect after 3 seconds
+                    setTimeout(() => this.setupWebSocket(), 3000);
+                };
+
+                this.websocket.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'file_changed') {
+                        this.loadModel();
+                    }
+                };
+            }
+
+            async loadInitialModel() {
+                // Load model on page load
+                await this.loadModel();
+            }
+
+            async loadModel() {
+                try {
+                    const response = await fetch('/compile');
+                    const data = await response.json();
+                    
+                    if (data.success && data.glb_data) {
+                        // Load actual GLB data
+                        await this.loadGLB(data.glb_data);
+                    } else {
+                        console.error('Compilation failed:', data.error || 'No GLB data returned');
+                        // Fallback to placeholder if GLB loading fails
+                        this.createPlaceholderModel(data.content || '// No content');
+                    }
+                } catch (error) {
+                    console.error('Failed to load model:', error);
+                    // Create a simple error indicator
+                    this.createErrorModel();
+                }
+            }
+
+            async loadGLB(glbBase64) {
+                try {
+                    // Decode base64 GLB data to binary
+                    const binaryString = atob(glbBase64);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    // Create a blob URL for the GLB data
+                    const blob = new Blob([bytes], { type: 'model/gltf-binary' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    // Load using GLTFLoader
+                    const gltf = await new Promise((resolve, reject) => {
+                        this.loader.load(
+                            url,
+                            (gltf) => resolve(gltf),
+                            (progress) => {
+                                // Optional: handle loading progress
+                            },
+                            (error) => reject(error)
+                        );
+                    });
+                    
+                    // Remove existing model
+                    if (this.currentModel) {
+                        this.scene.remove(this.currentModel);
+                    }
+                    
+                    // Add the new GLTF scene
+                    this.currentModel = gltf.scene;
+                    console.log('Loaded GLTF scene:', this.currentModel);
+                    
+                    // Process materials and apply custom shaders
+                    console.log('About to process materials...');
+                    this.processMaterials(gltf);
+                    console.log('Finished processing materials.');
+                    
+                    // Calculate mesh statistics and bounds
+                    let totalVertices = 0;
+                    let totalTriangles = 0;
+                    
+                    // Process all meshes and count geometry
+                    this.currentModel.traverse((child) => {
+                        if (child.isMesh) {
+                            // Count vertices and triangles
+                            if (child.geometry) {
+                                const positions = child.geometry.attributes.position;
+                                if (positions) {
+                                    totalVertices += positions.count;
+                                }
+                                
+                                const index = child.geometry.index;
+                                if (index) {
+                                    totalTriangles += index.count / 3;
+                                } else if (positions) {
+                                    totalTriangles += positions.count / 3;
+                                }
+                            }
+                        }
+                    });
+                    
+                    this.meshStats = { vertices: totalVertices, triangles: Math.floor(totalTriangles) };
+                    
+                    // Scale the model to fit in view (optional)
+                    const box = new THREE.Box3().setFromObject(this.currentModel);
+                    this.modelBounds = box;
+                    const size = box.getSize(new THREE.Vector3());
+                    const maxDim = Math.max(size.x, size.y, size.z);
+                    if (maxDim > 0) {
+                        const scale = 2 / maxDim; // Scale to fit in a 2x2x2 box
+                        this.currentModel.scale.setScalar(scale);
+                    }
+                    
+                    // Center the model
+                    const center = box.getCenter(new THREE.Vector3());
+                    this.currentModel.position.sub(center.multiplyScalar(this.currentModel.scale.x));
+                    
+                    this.scene.add(this.currentModel);
+                    
+                    // Update stats display
+                    this.updateStats();
+
+                    if(this.wireframeMode) {
+                        this.wireframeMode = false
+                        this.toggleWireframe()
+                    }
+                    
+                    // Clean up the blob URL
+                    URL.revokeObjectURL(url);
+                    
+                    console.log('GLB model loaded successfully');
+                    
+                } catch (error) {
+                    console.error('Failed to load GLB:', error);
+                    // Fallback to placeholder
+                    this.createPlaceholderModel('// GLB loading failed');
+                }
+            }
+
+            processMaterials(gltf) {
+                // Process each material in the GLTF and replace with custom materials
+                console.log('Processing materials for GLTF:', gltf);
+                
+                this.currentModel.traverse((child) => {
+                    if (child.isMesh) {
+                        console.log('Found mesh:', child);
+                        console.log('Original material:', child.material);
+                        console.log('Material name:', child.material?.name);
+                        
+                        const originalMaterial = child.material;
+                        const materialName = originalMaterial.name || 'default';
+                        
+                        // Create custom material based on the name from backend
+                        let customMaterial;
+                        if (materialName === 'checkerboard') {
+                            customMaterial = this.createCheckerboardMaterial();
+                        } else if (materialName === 'normal') {
+                            customMaterial = this.createNormalMaterial();
+                        } else if (materialName === 'glass') {
+                            customMaterial = this.createGlassMaterial();
+                        } else {
+                            customMaterial = this.createBasicMaterial();
+                        }
+                        
+                        child.material = customMaterial;
+                        console.log(`Applied ${materialName} material:`, customMaterial);
+                    }
+                });
+            }
+
+            createBasicMaterial() {
+                // Standard shading with Lambert material
+                return new THREE.MeshLambertMaterial({
+                    color: 0xffffff
+                });
+            }
+
+            createNormalMaterial() {
+                // Show the normal map as colors
+                return new THREE.MeshNormalMaterial();
+            }
+
+            createCheckerboardMaterial() {
+                // Create a checkerboard pattern using a canvas texture
+                const canvas = document.createElement('canvas');
+                canvas.width = 64;
+                canvas.height = 64;
+                const ctx = canvas.getContext('2d');
+                
+                const tileSize = 8;
+                for (let x = 0; x < canvas.width; x += tileSize) {
+                    for (let y = 0; y < canvas.height; y += tileSize) {
+                        const isEven = ((x / tileSize) + (y / tileSize)) % 2 === 0;
+                        ctx.fillStyle = isEven ? '#ffffff' : '#404040';
+                        ctx.fillRect(x, y, tileSize, tileSize);
+                    }
+                }
+                
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+                texture.repeat.set(4, 4);
+                texture.colorSpace = THREE.SRGBColorSpace;
+                
+                return new THREE.MeshLambertMaterial({
+                    map: texture
+                });
+            }
+
+            createGlassMaterial() {
+                // 50% translucent material with slight blue hue
+                return new THREE.MeshLambertMaterial({
+                    color: 0x9999ff,
+                    transparent: true,
+                    opacity: 0.5
+                });
+            }
+
+            createErrorModel() {
+                // Remove existing model
+                if (this.currentModel) {
+                    this.scene.remove(this.currentModel);
+                }
+
+                // Create a red error indicator
+                const geometry = new THREE.SphereGeometry(0.5, 16, 16);
+                const material = new THREE.MeshLambertMaterial({ color: 0xff0000 });
+                
+                this.currentModel = new THREE.Mesh(geometry, material);
+                
+                // Set error model stats
+                this.meshStats = { vertices: geometry.attributes.position.count, triangles: geometry.index ? geometry.index.count / 3 : 0 };
+                this.modelBounds = new THREE.Box3().setFromObject(this.currentModel);
+                
+                this.scene.add(this.currentModel);
+                this.updateStats();
+            }
+
+            createPlaceholderModel(sourceCode) {
+                // Remove existing model
+                if (this.currentModel) {
+                    this.scene.remove(this.currentModel);
+                }
+
+                // Create a placeholder geometry based on the source code
+                const geometry = new THREE.BoxGeometry(1, 1, 1);
+                const material = new THREE.MeshLambertMaterial({ 
+                    color: this.getColorFromSource(sourceCode)
+                });
+                
+                this.currentModel = new THREE.Mesh(geometry, material);
+                this.currentModel.userData.isPlaceholder = true; // Mark as placeholder for animation
+                
+                // Set placeholder stats
+                this.meshStats = { vertices: 8, triangles: 12 }; // Box geometry stats
+                this.modelBounds = new THREE.Box3().setFromObject(this.currentModel);
+                
+                this.scene.add(this.currentModel);
+                this.updateStats();
+            }
+
+            getColorFromSource(source) {
+                // Simple hash function to generate color from source code
+                let hash = 0;
+                for (let i = 0; i < source.length; i++) {
+                    const char = source.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash; // Convert to 32-bit integer
+                }
+                return Math.abs(hash) % 0xffffff;
+            }
+
+            onWindowResize() {
+                // Update perspective camera
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                
+                // Update orthographic camera using the centralized method
+                this.updateOrthographicZoom();
+                
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+                
+                // Update keyboard movement
+                this.updateMovement();
+                
+                // Only auto-rotate placeholder models, not GLTF models
+                if (this.currentModel && this.currentModel.userData.isPlaceholder) {
+                    this.currentModel.rotation.y += 0.01;
+                }
+                
+                this.renderer.render(this.scene, this.currentCamera);
+            }
+        }
+
+        // Initialize the viewer
+        new ModelViewer();
+    </script>
+</body>
+</html>
