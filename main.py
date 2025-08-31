@@ -267,7 +267,7 @@ async def export_file(filename: str):
                     # Calculate normals and UVs for GLB export
                     if file_ext == 'glb':
                         mesh = calculate_vertex_normals(mesh)
-                        mesh = calculate_vertex_uvs(mesh)
+                        mesh = mobj.uvMapper(mesh)
                         tmat = trimesh.visual.material.PBRMaterial()
                         tmat.name = material
                         mesh.visual = trimesh.visual.TextureVisuals(uv=mesh.vertex_attributes['uv'], material=tmat)
@@ -318,7 +318,7 @@ async def export_file(filename: str):
                 # Calculate normals and UVs for GLB export
                 if file_ext == 'glb':
                     mesh = calculate_vertex_normals(mesh)
-                    mesh = calculate_vertex_uvs(mesh)
+                    mesh = mobj.uvMapper(mesh)
                     tmat = trimesh.visual.material.PBRMaterial()
                     tmat.name = material
                     mesh.visual = trimesh.visual.TextureVisuals(uv=mesh.vertex_attributes['uv'], material=tmat)
@@ -480,7 +480,7 @@ def export_from_script(script_path: str, output_filename: str):
                     # Calculate normals and UVs for GLB export
                     if file_ext == 'glb':
                         mesh = calculate_vertex_normals(mesh)
-                        mesh = calculate_vertex_uvs(mesh)
+                        mesh = mobj.uvMapper(mesh)
                         tmat = trimesh.visual.material.PBRMaterial()
                         tmat.name = material
                         mesh.visual = trimesh.visual.TextureVisuals(uv=mesh.vertex_attributes['uv'], material=tmat)
@@ -530,7 +530,7 @@ def export_from_script(script_path: str, output_filename: str):
                 # Calculate normals and UVs for GLB export
                 if file_ext == 'glb':
                     mesh = calculate_vertex_normals(mesh)
-                    mesh = calculate_vertex_uvs(mesh)
+                    mesh = mobj.uvMapper(mesh)
                     tmat = trimesh.visual.material.PBRMaterial()
                     tmat.name = material
                     mesh.visual = trimesh.visual.TextureVisuals(uv=mesh.vertex_attributes['uv'], material=tmat)
