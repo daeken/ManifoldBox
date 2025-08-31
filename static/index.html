@@ -86,13 +86,16 @@
 
         class ModelViewer {
             constructor() {
+                THREE.Object3D.DefaultUp = new THREE.Vector3(0,0,1);
                 this.scene = new THREE.Scene();
-                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000000);
+                this.camera.up.set(0, 0, 1);
                 this.orthographicCamera = new THREE.OrthographicCamera(
                     window.innerWidth / -2, window.innerWidth / 2,
                     window.innerHeight / 2, window.innerHeight / -2,
-                    0.1, 1000
+                    0.1, 1000000
                 );
+                this.orthographicCamera.up.set(0, 0, 1);
                 this.currentCamera = this.camera; // Track which camera is active
                 this.isPerspective = true;
                 this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -105,11 +108,14 @@
                     w: false, a: false, s: false, d: false,
                     shift: false, space: false
                 };
-                this.moveSpeed = 0.1;
+                this.baseMoveSpeed = 0.1;
+                this.moveSpeedScale = 0.01; // Adjustable scaling factor
+                this.moveSpeed = this.baseMoveSpeed;
                 
                 // Stats tracking
                 this.modelBounds = null;
                 this.meshStats = { vertices: 0, triangles: 0 };
+                this.previousBoundingVolume = null;
                 
                 // Rendering modes
                 this.wireframeMode = false;
@@ -117,7 +123,8 @@
                 // Mouse controls
                 this.mouseX = 0;
                 this.mouseY = 0;
-                this.mouseSensitivity = 0.002;
+                this.mouseSensitivityX = 0.003; // 1.5x Y sensitivity
+                this.mouseSensitivityY = 0.002;
                 this.pitch = 0;
                 this.yaw = 0;
                 this.isMouseDown = false;
@@ -139,12 +146,13 @@
 
                 // Setup cameras
                 this.camera.position.set(5, 5, 5);
+                console.log(this.camera.up);
                 this.orthographicCamera.position.set(5, 5, 5);
                 
                 // Calculate initial look direction to point at origin
                 const lookDirection = new THREE.Vector3(0, 0, 0).sub(this.camera.position).normalize();
-                this.yaw = Math.atan2(lookDirection.x, lookDirection.z);
-                this.pitch = Math.asin(-lookDirection.y);
+                this.yaw = Math.atan2(lookDirection.x, lookDirection.y);
+                this.pitch = Math.asin(-lookDirection.z);
                 
                 // Set initial camera orientation for both cameras
                 this.updateCameraRotation();
@@ -170,7 +178,8 @@
                 this.scene.add(light3);
 
                 // Add a grid
-                const gridHelper = new THREE.GridHelper(100, 100);
+                const gridHelper = new THREE.GridHelper(10000, 100);
+                gridHelper.rotation.x = Math.PI / 2;
                 gridHelper.material.opacity = 0.3;
                 gridHelper.material.transparent = true;
                 this.scene.add(gridHelper);
@@ -214,6 +223,18 @@
                             this.toggleWireframe();
                             event.preventDefault();
                             break;
+                        case 'BracketLeft': // [ key - decrease speed scaling
+                            this.moveSpeedScale = Math.max(0.001, this.moveSpeedScale * 0.8);
+                            this.updateMoveSpeed();
+                            console.log(`Move speed scale: ${this.moveSpeedScale.toFixed(4)}, Move speed: ${this.moveSpeed.toFixed(3)}`);
+                            event.preventDefault();
+                            break;
+                        case 'BracketRight': // ] key - increase speed scaling
+                            this.moveSpeedScale = Math.min(0.1, this.moveSpeedScale * 1.25);
+                            this.updateMoveSpeed();
+                            console.log(`Move speed scale: ${this.moveSpeedScale.toFixed(4)}, Move speed: ${this.moveSpeed.toFixed(3)}`);
+                            event.preventDefault();
+                            break;
                     }
                 });
 
@@ -241,33 +262,49 @@
                     }
                 });
 
-                // Mouse controls
+                // Mouse controls with pointer lock
                 this.renderer.domElement.addEventListener('mousedown', (event) => {
                     this.isMouseDown = true;
                     this.lastMouseX = event.clientX;
                     this.lastMouseY = event.clientY;
+                    
+                    // Request pointer lock to capture and hide cursor
+                    this.renderer.domElement.requestPointerLock();
                 });
 
                 document.addEventListener('mouseup', () => {
                     this.isMouseDown = false;
+                    
+                    // Exit pointer lock when mouse is released
+                    if (document.pointerLockElement) {
+                        document.exitPointerLock();
+                    }
                 });
 
                 document.addEventListener('mousemove', (event) => {
                     if (!this.isMouseDown) return;
 
-                    const deltaX = event.clientX - this.lastMouseX;
-                    const deltaY = event.clientY - this.lastMouseY;
+                    let deltaX, deltaY;
+                    
+                    // Use movementX/Y when in pointer lock mode
+                    if (document.pointerLockElement) {
+                        deltaX = event.movementX;
+                        deltaY = event.movementY;
+                    } else {
+                        // Fallback to regular mouse position tracking
+                        deltaX = event.clientX - this.lastMouseX;
+                        deltaY = event.clientY - this.lastMouseY;
+                        this.lastMouseX = event.clientX;
+                        this.lastMouseY = event.clientY;
+                    }
 
-                    this.yaw -= deltaX * this.mouseSensitivity;
-                    this.pitch += deltaY * this.mouseSensitivity; // Fixed: + instead of - for natural control
+                    this.yaw += deltaX * this.mouseSensitivityX;
+                    this.pitch += deltaY * this.mouseSensitivityY;
 
                     // Limit pitch to prevent camera flipping
                     this.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, this.pitch));
 
                     this.updateCameraRotation();
-
-                    this.lastMouseX = event.clientX;
-                    this.lastMouseY = event.clientY;
                 });
             }
 
@@ -275,8 +312,8 @@
                 // Calculate look direction from yaw and pitch
                 const direction = new THREE.Vector3();
                 direction.x = Math.sin(this.yaw) * Math.cos(this.pitch);
-                direction.y = -Math.sin(this.pitch);
-                direction.z = Math.cos(this.yaw) * Math.cos(this.pitch);
+                direction.y = Math.cos(this.yaw) * Math.cos(this.pitch);
+                direction.z = -Math.sin(this.pitch);
                 
                 // Set camera rotation for both cameras
                 const lookTarget = new THREE.Vector3().addVectors(this.currentCamera.position, direction);
@@ -290,13 +327,15 @@
                 // Calculate movement directions relative to camera orientation
                 const forward = new THREE.Vector3();
                 const right = new THREE.Vector3();
-                const up = new THREE.Vector3(0, 1, 0);
+                const up = new THREE.Vector3(0, 0, 1);
                 
                 // Forward/back: camera's look direction
                 this.camera.getWorldDirection(forward);
                 
                 // Right/left: perpendicular to forward and up
                 right.crossVectors(forward, up).normalize();
+
+                //console.log(forward, right, up);
                 
                 // Calculate movement based on key presses
                 if (this.keys.w) {
@@ -343,6 +382,14 @@
                 this.orthographicCamera.top = size;
                 this.orthographicCamera.bottom = -size;
                 this.orthographicCamera.updateProjectionMatrix();
+            }
+
+            updateMoveSpeed() {
+                if (this.modelBounds) {
+                    const size = this.modelBounds.getSize(new THREE.Vector3());
+                    const maxDim = Math.max(size.x, size.y, size.z);
+                    this.moveSpeed = this.baseMoveSpeed + (maxDim * this.moveSpeedScale);
+                }
             }
 
             updateStats() {
@@ -514,19 +561,72 @@
                     
                     this.meshStats = { vertices: totalVertices, triangles: Math.floor(totalTriangles) };
                     
-                    // Scale the model to fit in view (optional)
-                    const box = new THREE.Box3().setFromObject(this.currentModel);
-                    this.modelBounds = box;
-                    const size = box.getSize(new THREE.Vector3());
+                    // First, center the model at world origin in its original coordinate system
+                    const originalBox = new THREE.Box3().setFromObject(this.currentModel);
+                    const originalCenter = new THREE.Vector3(
+                        (originalBox.min.x + originalBox.max.x) / 2,
+                        (originalBox.min.y + originalBox.max.y) / 2,
+                        (originalBox.min.z + originalBox.max.z) / 2
+                    );
+                    this.currentModel.position.set(-originalCenter.x, -originalCenter.y, -originalCenter.z);
+                    
+                    // Recalculate bounding box after centering for accurate bounds and scaling
+                    const centeredBox = new THREE.Box3().setFromObject(this.currentModel);
+                    this.modelBounds = centeredBox;
+                    
+                    // Check if we should reposition the camera
+                    const size = centeredBox.getSize(new THREE.Vector3());
                     const maxDim = Math.max(size.x, size.y, size.z);
-                    if (maxDim > 0) {
-                        const scale = 2 / maxDim; // Scale to fit in a 2x2x2 box
-                        this.currentModel.scale.setScalar(scale);
+                    const currentVolume = size.x * size.y * size.z;
+                    
+                    let shouldRepositionCamera = false;
+                    
+                    if (this.previousBoundingVolume === null) {
+                        // First load - always reposition
+                        shouldRepositionCamera = true;
+                    } else {
+                        // Check if volume changed by more than 10%
+                        const volumeChange = Math.abs(currentVolume - this.previousBoundingVolume) / this.previousBoundingVolume;
+                        if (volumeChange > 0.1) {
+                            shouldRepositionCamera = true;
+                            console.log(`Volume changed by ${(volumeChange * 100).toFixed(1)}% - repositioning camera`);
+                        }
                     }
                     
-                    // Center the model
-                    const center = box.getCenter(new THREE.Vector3());
-                    this.currentModel.position.sub(center.multiplyScalar(this.currentModel.scale.x));
+                    if (maxDim > 0) {
+                        if (shouldRepositionCamera) {
+                            // Calculate distance needed to frame the object
+                            const fov = this.camera.fov * (Math.PI / 180); // Convert to radians
+                            const distance = (maxDim / 2) / Math.tan(fov / 2);
+                            
+                            // Add 75% padding
+                            const paddedDistance = distance * 1.75;
+                            
+                            // Maintain current camera direction but adjust distance
+                            const currentDirection = new THREE.Vector3();
+                            this.camera.getWorldDirection(currentDirection);
+                            currentDirection.normalize().multiplyScalar(-paddedDistance);
+                            
+                            // Set new camera position
+                            this.camera.position.copy(currentDirection);
+                            this.orthographicCamera.position.copy(currentDirection);
+                            
+                            // Update orthographic camera size to match
+                            this.updateOrthographicZoom();
+                            
+                            console.log(`Object size: ${maxDim.toFixed(2)}, Camera distance: ${paddedDistance.toFixed(2)}`);
+                        }
+                        
+                        // Always update movement speed based on object size
+                        this.moveSpeed = this.baseMoveSpeed + (maxDim * this.moveSpeedScale);
+                        
+                        // Store current volume for next comparison
+                        this.previousBoundingVolume = currentVolume;
+                        
+                        if (shouldRepositionCamera) {
+                            console.log(`Move speed: ${this.moveSpeed.toFixed(3)}`);
+                        }
+                    }
                     
                     this.scene.add(this.currentModel);
                     
@@ -584,13 +684,16 @@
             createBasicMaterial() {
                 // Standard shading with Lambert material
                 return new THREE.MeshLambertMaterial({
-                    color: 0xffffff
+                    color: 0xffffff,
+                    side: THREE.DoubleSide
                 });
             }
 
             createNormalMaterial() {
                 // Show the normal map as colors
-                return new THREE.MeshNormalMaterial();
+                return new THREE.MeshNormalMaterial({
+                    side: THREE.DoubleSide
+                });
             }
 
             createCheckerboardMaterial() {
@@ -616,7 +719,8 @@
                 texture.colorSpace = THREE.SRGBColorSpace;
                 
                 return new THREE.MeshLambertMaterial({
-                    map: texture
+                    map: texture,
+                    side: THREE.DoubleSide
                 });
             }
 
@@ -625,7 +729,8 @@
                 return new THREE.MeshLambertMaterial({
                     color: 0x9999ff,
                     transparent: true,
-                    opacity: 0.5
+                    opacity: 0.5,
+                    side: THREE.DoubleSide
                 });
             }
 
