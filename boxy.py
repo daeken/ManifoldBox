@@ -1,4 +1,6 @@
 import manifold3d as m3d
+import numpy as np
+import trimesh
 
 objects = []
 
@@ -16,9 +18,12 @@ def set_default_segments(n):
 	global default_segments
 	default_segments = n
 
-def add(material='basic', name=None):
+def add(material='basic', name=None, uvMapper=None):
 	def sub(func):
-		add_object(func(), material=material, name=name or func.__name__)
+		obj = func()
+		if uvMapper is not None:
+			obj.uvMapper = uvMapper
+		add_object(obj, material=material, name=name or func.__name__)
 		return func
 	if isinstance(material, str):
 		return sub
@@ -123,6 +128,7 @@ class Circle(O2D):
 class O3D:
 	def __init__(self, manifold):
 		self.manifold = manifold
+		self.uvMapper = uvBoxMap
 
 	def to_mesh(self):
 		return self.manifold.to_mesh()
@@ -174,3 +180,98 @@ class Cylinder(O3D):
 			if r2 is None:
 				r2 = d1 / 2 if d2 is None else d2 / 2
 		super().__init__(m3d.Manifold.cylinder(h, r1, r1 if r2 is None else r2, segments if segments != 0 else default_segments, center))
+
+def uvBoxMap(mesh):
+	vertices = mesh.vertices
+	faces = mesh.faces
+	vertex_normals = mesh.vertex_normals if hasattr(mesh, 'vertex_normals') and mesh.vertex_normals is not None else None
+
+	assert vertex_normals is not None
+	
+	# Calculate bounding box for normalization
+	vmin = np.min(vertices, axis=0)
+	vmax = np.max(vertices, axis=0)
+	vrange = vmax - vmin
+	
+	# Avoid division by zero
+	vrange = np.where(vrange == 0, 1, vrange)
+	
+	def gen_uv(vertex, normal):
+		"""Generate UV coordinates for a vertex based on its normal (box unwrapping)"""
+		# Normalize vertex to 0-1 range
+		v = (vertex - vmin) / vrange
+		
+		# Create 2D projections
+		xy = np.array([v[0], v[1]])  # X-Y plane
+		yz = np.array([v[1], v[2]])  # Y-Z plane  
+		xz = np.array([v[0], v[2]])  # X-Z plane
+		
+		# Find dominant normal axis
+		abs_normal = np.abs(normal)
+		max_component = np.max(abs_normal)
+		
+		# Create dominant axis normal
+		if abs_normal[0] == max_component:  # X dominant
+			dom_normal = np.array([np.sign(normal[0]), 0, 0])
+		elif abs_normal[1] == max_component:  # Y dominant
+			dom_normal = np.array([0, np.sign(normal[1]), 0])
+		else:  # Z dominant
+			dom_normal = np.array([0, 0, np.sign(normal[2])])
+		
+		# Blend projections based on dominant normal
+		uv = xy * abs(dom_normal[2]) + yz * abs(dom_normal[0]) + xz * abs(dom_normal[1])
+		
+		return uv
+	
+	# Calculate UVs for each original vertex with area weighting from adjacent faces
+	uvs = [[] for _ in vertices]
+	
+	for face in faces:
+		# Get face vertices
+		v0, v1, v2 = vertices[face]
+		
+		# Calculate face normal and area
+		edge1 = v1 - v0
+		edge2 = v2 - v0
+		face_normal = np.cross(edge1, edge2)
+		face_area = np.linalg.norm(face_normal) / 2.0
+		
+		if face_area > 0:
+			face_normal = face_normal / (face_area * 2)  # Normalize
+			
+			# Generate UVs for each vertex of this face using face normal
+			for vertex_idx in face:
+				vertex = vertices[vertex_idx]
+				uv = gen_uv(vertex, face_normal)
+				uvs[vertex_idx].append((face_area, uv))
+	
+	# Calculate final UVs with area weighting
+	vertex_uvs = np.zeros((len(vertices), 2))
+	
+	for i, uv_list in enumerate(uvs):
+		if len(uv_list) == 0:
+			vertex_uvs[i] = [0.0, 0.0]
+		else:
+			total_area = sum(area for area, _ in uv_list)
+			if total_area > 0:
+				u = sum(uv[0] * (area / total_area) for area, uv in uv_list)
+				v = sum(uv[1] * (area / total_area) for area, uv in uv_list)
+				vertex_uvs[i] = [u, v]
+			else:
+				vertex_uvs[i] = [0.0, 0.0]
+	
+	# Create a new mesh with the calculated UVs
+	mesh_with_uvs = trimesh.Trimesh(
+		vertices=vertices,
+		faces=faces,
+		vertex_normals=vertex_normals
+	)
+	
+	# Add UV coordinates as vertex attributes
+	mesh_with_uvs.vertex_attributes['uv'] = vertex_uvs
+	
+	# Copy over any existing visual properties
+	if hasattr(mesh, 'visual'):
+		mesh_with_uvs.visual = mesh.visual
+	
+	return mesh_with_uvs
